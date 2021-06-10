@@ -1,0 +1,602 @@
+---
+title: "Lapage"
+subtitle : "Analyse du chiffre d'affaires"
+author: "Emmanuel Messori"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme : "sandstone"
+    toc: true
+    toc_float : true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE, message = FALSE)
+```
+
+### Librairies {-}
+
+```{r packages, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(scales)
+library(lubridate)
+library(knitr)
+library(zoo)
+source("C:/Users/teore/OneDrive/OC_DataAnalyst/P6/euro.R")
+```
+
+```{r echo=FALSE}
+# Changing the default theme
+theme_set(theme_classic())
+```
+
+# Analyse de conformité des données
+
+## Chargement
+
+```{r data}
+
+customers <- read_csv("customers.csv", col_types = c('cfd'))
+products <- read_csv('products.csv', col_types = c('cdf'))
+transactions <- read_csv('transactions.csv')
+
+```
+
+Problèmes de décodage dans le fichier transactions. Il s'agit de lignes de test avec id T_0 donc on peut laisser ces valeurs nulles ou bien les retirer.
+
+```{r}
+glimpse(products)
+glimpse(transactions)
+```
+
+## Valeurs manquantes
+
+```{r}
+transactions %>% filter(is.na(date)) %>% unique()
+#les lignes dont la date a été traduite par des valeurs nulles sont que de tests; on pourra retirer le même id sur le fichier produits
+transactions <- na.omit(transactions)
+products[!products$id_prod == 'T_0',] -> products
+```
+
+## Test unicité
+
+```{r}
+sum(duplicated(products$id_prod))
+```
+
+Comparaison entre les id des deux dataframes. Une valeur de product_id du fichier transactions n'est pas présente dans products. 21 références du fichier products ne paraissent pas dans transactions.
+
+```{r}
+
+diffprodtr <- setdiff(products$id_prod, transactions$id_prod)
+difftrprod <- setdiff(transactions$id_prod, products$id_prod)
+
+transactions[transactions$id_prod == '0_2245',]
+
+products[products$id_prod %in% diffprodtr,]
+
+```
+
+```{r}
+pdtr <- merge(products, transactions, on='product_id')
+head(pdtr)
+glimpse(pdtr)
+```
+
+* * *
+
+# Présentation du chiffre d'affaires global
+
+
+```{r}
+#création des intervalles par semaine et mois
+pdtr$week <- as.Date(cut(pdtr$date,breaks = "week"))
+pdtr$month <- as.Date(cut(pdtr$date,breaks = "month"))
+```
+
+```{r}
+ca_m <- pdtr %>% group_by(month) %>% summarise(CA = sum(price)) # CA par mois
+ca_h <- pdtr %>% group_by(week) %>% summarise(CA = sum(price)) # CA par semaine
+ca_j <- pdtr %>% group_by(day = as.Date(date)) %>% summarise(CA = sum(price)) # CA par jour 
+ca_m %>% summarise(max(CA), min(CA), mean(CA), median(CA), sd(CA)) %>% mutate(across(.fns=euro)) %>% kable(caption = "CA mensuel global")
+summarise(ca_h, max(CA), min(CA), mean(CA), median(CA), sd(CA)) %>% mutate(across(.fns=euro)) %>% kable(caption = "CA hebdomadaire global")
+summarise(ca_j, max(CA), min(CA), mean(CA), median(CA), sd(CA)) %>% mutate(across(.fns=euro)) %>% kable(caption = "CA journalier global")
+```
+
+```{r}
+
+sd <- sd(ca_m$CA)
+ggplot(data = ca_m,aes(month, CA)) +
+  geom_col(fill = "steelblue") + geom_hline(yintercept = mean(ca_m$CA), colour ='red') +
+  scale_x_date(date_labels = "%b-%Y" ,breaks = "2 month") + 
+  theme(axis.text.x = element_text(angle = 90)) + 
+  labs(x = '', y = 'Totale des ventes', title = "Chiffre d'affaires mensuel") +
+  scale_y_continuous(labels = euro, n.breaks = 6)
+```
+
+```{r warning=FALSE}
+#adding rolling average
+ca_m %>% mutate(rolavr = rollmean(x = CA, k = 3, align = "center", na.pad = TRUE)) -> ca_m
+ca_h %>% mutate(rolavr = rollmean(x = CA, k = 4, align = "center", na.pad = TRUE)) -> ca_h
+ca_h[ca_h$week == '2023-02-13',]$rolavr = NA
+# graph by week:
+colors <- c("Total" = "steelblue", "Moyenne Mensuelle" = "black", "Moyenne Mobile" = "red")
+ggplot(data = pdtr,
+  aes(week, price)) +
+  stat_summary(aes(color='Total'), fun = sum, 
+    geom = "line", size = 2) + geom_line(data = ca_h, aes(x=week, y=rolavr,color='Moyenne Mobile'),show.legend = TRUE, size=1) + geom_hline(aes(color="Moyenne Mensuelle"), yintercept = mean(ca_h$CA),linetype='dotted',show.legend = TRUE) + scale_x_date(labels = date_format('%b-%Y'), breaks = "3 month", limits = c(min(pdtr$week), max(pdtr$week) -7)) +
+    labs(title="Evolution du chiffre d'affaires hebdomadaire", y="Total hebdomadaire",x="")  + scale_y_continuous(labels=euro) + scale_color_manual(values =colors) +theme_minimal() + theme(axis.text.x = element_text(angle = 90), legend.title = element_blank()) 
+```
+
+## Chiffre d'affaires par categorie et par produit
+
+### Repartition du prix des produits
+
+```{r include=FALSE}
+#définition d'une palette pour les catégories des produits
+library(RColorBrewer)
+myColors <- brewer.pal(3,"Paired")
+names(myColors) <- levels(pdtr$categ)
+colScale <- scale_fill_manual(name = "categ",values = myColors)
+colScale_col <- scale_color_manual(name = "categ",values = myColors)
+```
+
+On analysera les prix listés dans le fichier `products` pour avoir un coup d'œil sur les prix et leur indicateurs.
+
+```{r}
+products %>% group_by(categ) %>% summarise(min(price), max(price), mean(price), median(price), sd(price))
+products %>% ggplot(aes(categ, price)) + geom_boxplot(aes(fill=categ)) + scale_y_continuous(labels=euro, n.breaks=8) + colScale + labs(x = "Categorie", y = "Prix")
+
+```
+
+On remarque la présence des trois tranches des prix bien demarquées et que la catégorie "2" se distingue nettement de deux autres avec une médiane de \~100€. Regardons maintenant le chiffre global par catégorie et le top produits:
+
+```{r}
+ventes_tot_cat <-  pdtr %>% group_by(categ) %>% summarise(total = sum(price))
+ventes_tot_prod <- pdtr %>% group_by(id_prod, categ) %>% summarise(n_ventes = n(), total = sum(price)) %>% arrange(desc(total))
+ventes_tot_cat %>% mutate(total = euro(total)) %>% kable(caption = 'Ventes totales par categorie')
+head(ventes_tot_prod,10) %>% mutate(total = euro(total)) %>% kable(align = c('lccr'), caption='Top 10 produits')
+tail(ventes_tot_prod,10) %>% mutate(total = euro(total)) %>% kable(align = c('lccr'), caption='Le 10 produits moins vendus')
+```
+
+
+```{r}
+ggplot(ventes_tot_cat %>% ungroup(), aes(x=categ, y=total, fill= categ)) + geom_col(color="white", position = 'dodge') + scale_y_continuous(labels = euro) +
+  labs(title = "Chiffre d'affaires par categorie", x="Categorie", y="Total")  + colScale 
+```
+
+```{r}
+top20r <- ventes_tot_prod %>% ungroup() %>%  slice_max(total, n = 20, with_ties = FALSE)
+top20nv <- ventes_tot_prod %>% ungroup() %>%  slice_max(n_ventes, n = 20, with_ties = FALSE)
+#distribution n ventes?
+
+ggplot(top20r, aes(x = fct_reorder(id_prod, total, .desc = TRUE), y= total, fill= categ)) + geom_col() +  labs(title='Top 20 produits par revenu', x='Id Produit', y='Total ventes') + scale_y_continuous(labels=euro, n.breaks = 7) + colScale + theme(axis.text.x = element_text(angle = 90)) 
+
+ggplot(top20nv, aes(x = fct_reorder(id_prod, n_ventes, .desc = TRUE), y= n_ventes, fill= categ)) + geom_col() +  labs(title='Top 20 produits le plus vendus', x='Id Produit', y='Total ventes') +  colScale +  theme(axis.text.x = element_text(angle = 90)) 
+```
+
+La catégorie 1 c'est celle qui apporte le plus de revenus mais elle ne dépasse pas largement la catégorie 0. Le top produits sont de catégorie 2 et 1 (la catégorie qui a le prix moyen plus fort) et on ne retrouve pas de produits cat. 0, qui pourtant dépasse la 2 en CA totale. Entre le produits le plus vendu on retrouve plusieurs références de cat1  qui sont aussi en tête de liste pour revenus.
+
+
+## Analyse des clients
+
+Nous allons joindre le fichier `pdtr` créé précedemment au fichier `customers` qui contient en outre que l'identifiant du client, son genre et son année de naissance.
+
+```{r}
+str(customers)
+sum(duplicated(customers$client_id)) # les id clients sont uniques
+all(is.element(pdtr$client_id, customers$client_id)) # toutes les id client du fichier pdtr sont inclues dans customers
+setdiff(customers$client_id, pdtr$client_id) # quelques id ne sont pas références dans transactions, on peut les ignorer
+pdtr_cust <- merge(pdtr, customers, on = 'client_id')
+str(pdtr_cust)
+```
+
+```{r}
+summary(pdtr_cust)
+```
+Analysons maintenant le chiffre d'affaire par client, pour mettre en évidence les clients principaux.
+
+```{r}
+achatsxclient <- pdtr_cust %>% group_by(client_id) %>% summarise(tot_achats = sum(price)) %>% arrange(desc(tot_achats))
+achatsxclient %>% head(10) %>% mutate(tot_achats = euro(tot_achats)) %>% kable()
+achatsxclient %>% ggplot(aes(tot_achats)) + geom_boxplot() + scale_x_continuous(label=euro) + theme(axis.ticks.y = element_blank(), axis.text.y = element_blank())
+
+```
+
+### Repartition du chiffre d'affaire cumulatif (courbe de Lorenz)
+
+Le quatre clients en tête de liste constituent le \~ 0.05 % des clients totaux et il génèrent a peut près le 7.5% du chiffre d'affaires totale:
+
+```{r echo=FALSE}
+library(ineq)
+lorenz <- Lc(achatsxclient$tot_achats)
+perc_business <- 4 / 8600
+cat("% du CA totale des clients principaux:", 1 - (quantile(lorenz[[2]], 1 - perc_business)), "\n")
+cat("coefficient gini:",ineq(achatsxclient$tot_achats), "\n") #gini
+plot(lorenz)
+
+```
+
+On peut donc supposer que les premiers quatre clients, vu leur total d'achats soient des business. Pour étudier les clients "normaux" on verra donc de le mettre a coté.
+
+```{r}
+business_id <- achatsxclient[1:4, "client_id"]$client_id
+clients <- pdtr_cust %>% filter(!client_id %in% business_id)
+b_to_b <- pdtr_cust[pdtr_cust$client_id %in% business_id,]
+```
+
+
+### Repartition des clients par tranche d'age
+
+Examinons maintenant la distribution des age des clients.
+
+```{r}
+# binning by birth year
+clients$agegroup <-cut(clients$birth, 5, dig.lab = 10)
+
+n_age <- clients %>% group_by(birth,sex) %>% distinct(client_id) %>% count() %>% arrange(desc(n))
+n_clients <- clients %>% group_by(agegroup, sex) %>% distinct(client_id,sex) %>% count() %>% arrange(desc(n))
+
+clients %>% distinct(client_id,birth) %>% summarise(min(birth), max(birth), mean(birth), median(birth), IQR(birth), sd(birth))
+
+clients %>% group_by(client_id) %>% distinct(client_id,sex,birth) %>%  ggplot(aes(x = sex, y = birth, fill=sex)) + geom_boxplot() + labs(x="Sexe", y="Année de naissance") 
+
+ n_age %>% ggplot(aes(birth, n)) + geom_col(aes(fill=sex), color="white") + scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) + labs(title="Nombre des clients par age et sexe") 
+
+   n_clients %>% ggplot(aes(agegroup, n)) + geom_col(aes(fill=sex), color="white") +  scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) + labs(x="Tranche d'age", y="Nombre de personnes") 
+```
+
+La répartition par sexe des clients est a peu près égale, avec une prévalence des générations over 1974. L'année de naissance plus présent est le 2004 avec \~430 membres.
+
+
+## Chiffre d'affaires par tranche d'age et categorie
+
+```{r}
+clients %>%  group_by(agegroup) %>% summarise(total_ventes = sum(price))%>% arrange(desc(total_ventes)) %>% mutate(total_ventes = euro(total_ventes))
+clients %>%  ggplot(aes(x=agegroup,fill=categ)) + geom_bar(aes(weight = price), color='grey') + scale_y_continuous(labels=euro) + colScale + labs(x='Année de naissance', y='Ventes totales') 
+```
+
+```{r}
+clients %>%  ggplot(aes(x=categ,fill=categ)) + geom_bar(aes(weight = price), color='grey') +  facet_grid(.~ agegroup) +   scale_y_continuous(labels=euro) + colScale + labs(x='', y='Ventes totales')
+```
+
+ 
+C'est évidente la préférence de la tranche (1989, 2005) pour le produits de catégorie deux, catégorie sur laquelle ils ont presque l'exclusivité et engendre le plus gros revenus (toute tranche d'age confondue). En revanche, la tranche d'age qui contribue le plus au chiffre d'affaire c'est 1974-1989 avec un CA totale de 4M €.
+
+```{r}
+#création du df stats_clients
+achats_clients_cat <- clients %>% 
+  group_by(client_id) %>% 
+  count(categ) %>% 
+  pivot_wider(names_from = categ, values_from = n, names_glue = "cat_{categ}", values_fill = 0)
+
+achats_clients <- clients %>% 
+  group_by(client_id,agegroup,sex, birth) %>% 
+  summarise(tot_achats = sum(price), achats_mois = n()/24) 
+
+achats_session <- clients %>% group_by(client_id,session_id) %>% summarise(tot_session = sum(price)) %>% group_by(client_id) %>% summarise(panier_moyen = median(tot_session))
+
+stats_clients <- merge(achats_clients, achats_session )
+stats_clients <- merge(stats_clients, achats_clients_cat)
+head(stats_clients)
+```
+
+### Repartition du CA par tranche d'age et par sexe
+
+
+```{r}
+achats_clients %>% group_by(agegroup) %>% summarise(tot_age = sum(tot_achats)) %>% mutate(pourcentage = tot_age / sum(tot_age) * 100) -> ca_age
+ca_age %>%  ggplot(aes(x= fct_reorder(agegroup, pourcentage), y=pourcentage, fill=agegroup)) + geom_bar(stat='identity', color="black", position = "dodge")  + scale_y_continuous(labels=euro) + geom_text(aes(y = pourcentage, label = percent(pourcentage/100)), size=5, nudge_y = 1.5) + theme_void() + labs(title="Pourcentage du CA total par tranche d'age")
+```
+
+
+```{r}
+
+psex <- clients %>% group_by(sex) %>% summarise(total = sum(price))%>% mutate(p = total/sum(total))   
+psex %>% ggplot(aes(x=sex, y=total, fill=sex)) + geom_col() +   scale_y_continuous(labels = euro) + geom_text(data=psex, aes(label = percent(p))) + labs(title = "Repartition par genre du chiffre d'affaires total")
+  
+
+
+
+```
+
+
+### Test de difference entre deux moyennes
+
+Nous allons nous poser la question suivante juste a but didactique. **Il faudra remarquer que plusieurs tests statistiques ont un sens seulement si appliqués sur des échantillons de la population** (test de comparaison de la variance, t-test, ANOVA). Ici nous travaillons sur la totalité de la population, donc ces paramétres nous les connaissons déjà.
+
+- Est-ce qu'il existe une différence significative entre les totaux d'achats des clients des deux sexes ?
+
+    Conditions pour un t-test
+    
+  1)les deux échantillons doivent être **indépendants** et **normalement distribués**. 
+
+  2)Ça  sera alors possible de tester l'égalité de la variance et successivement l'égalité des moyennes.
+
+```{r}
+
+stats_clients %>% group_by(sex) %>% summarise(mean(tot_achats), median(tot_achats)) %>% kable()
+
+achats_clients %>% ggplot(aes(x=sex, y=tot_achats, fill=sex)) + geom_boxplot()+ stat_summary(fun=mean) + scale_y_continuous(label=euro, n.breaks = 10) + theme_minimal()
+
+achats_clients %>% ggplot(aes(x=tot_achats, fill=sex)) +  geom_histogram(aes(y=..density..), color="white") + geom_density(alpha=0.5) + facet_wrap(~sex) +scale_y_continuous(labels = scales::percent) + scale_x_continuous(label=euro)
+
+op = par(mfrow=c(1,2))
+qqnorm(subset(achats_clients, sex=='m')$tot_achats)
+qqline(subset(achats_clients, sex=='m')$tot_achats)
+qqnorm(subset(achats_clients, sex=='f')$tot_achats)
+qqline(subset(achats_clients, sex=='f')$tot_achats)
+par(op)
+
+#les deux distributions ne remplissent les conditions de normalité. On procédera a un test non-paramétrique, qui dans ce cas testera l'hypothese d'egalité des medianes des deux groupes:
+
+wilcox.test(achats_clients$tot_achats[achats_clients$sex=='m'],achats_clients$tot_achats[achats_clients$sex=='f'])
+
+```
+
+On ne rejettera donc pas H0 **muhommes == mufemmes** et on ne concluera que le sexe n'as pas d'influence sur la somme des achats d'un client.
+
+-----
+
+
+### CA Business to Client
+
+```{r warning=FALSE}
+#statistiques b to c
+clients %>% group_by(month) %>% summarise(CA = sum(price)) %>% summarise(max(CA), min(CA), mean(CA), median(CA), sd(CA)) %>% mutate(across(.fns=euro)) %>% kable(caption = "CA mensuel")
+clients %>% group_by(week) %>% summarise(CA = sum(price)) %>% summarise( max(CA), min(CA), mean(CA), median(CA), sd(CA)) %>% mutate(across(.fns=euro)) %>% kable(caption = "CA hebdomadaire")
+clients %>% group_by(day = as.Date(date)) %>% summarise(CA = sum(price)) %>% summarise(max(CA), min(CA), mean(CA), median(CA), sd(CA)) %>% mutate(across(.fns=euro)) %>% kable(caption = "CA journalier")
+
+ca_mois_c <- clients %>% group_by(month) %>% summarise(CA = sum(price)) %>% mutate(rolavr = rollmean(CA,3, na.pad = TRUE))
+
+ca_week_c <- clients %>% group_by(week) %>% summarise(CA = sum(price)) %>% mutate(rolavr = rollmean(CA,3, na.pad = TRUE))
+
+ggplot(data = clients,
+  aes(month, price)) +
+  stat_summary(aes(fill=agegroup),fun = sum, 
+    geom = "bar", position="stack")  + geom_line(data = ca_mois_c, aes(x = month, y=rolavr), color="red",size=1) +
+  scale_x_date(labels = date_format("%b-%Y"), limits = c(min(clients$week), max(clients$week) - 7)) + labs(title="Evolution du chiffre d'affaires hebdomadaire BtoC par tranche d'age", y="",x="")  + scale_y_continuous(labels=euro) +  theme(axis.text.x = element_text(angle = 90)) + geom_vline(data = ca_j, aes(xintercept = as.Date('2021-10-01')), linetype='dotted')
+
+ggplot(data = clients,
+  aes(week, price)) +
+  stat_summary(aes(fill=categ),geom='bar',fun = sum,size=1,position ='stack')  +  geom_line(data = ca_week_c, aes(x = week, y=rolavr), color="red",size=1) +
+   colScale +
+  scale_x_date(labels = date_format("%b-%Y"),  breaks = "3 months") + labs(title="Evolution du chiffre d'affaire BtoC hebdomadaire par categorie", y="",x="")  + scale_y_continuous(labels=euro) + theme(axis.text.x = element_text(angle = 90)) + geom_vline(data = ca_j, aes(xintercept = as.Date('2021-10-01')), linetype='dotted')
+```
+```{r}
+# B to B
+ca_week_btb <- b_to_b %>% group_by(week) %>% summarise(CA = sum(price)) %>% mutate(rolavr = rollmean(CA,3, na.pad = TRUE))
+
+ggplot(data = b_to_b,
+  aes(week, price)) +
+  stat_summary(aes(fill=categ),geom='bar',fun = sum,position ='stack')  +  geom_line(data = ca_week_btb, aes(x = week, y=rolavr), color="red", size=1) +
+   colScale +
+  scale_x_date(labels = date_format("%b-%Y"),  breaks = "3 month") + labs(title="Evolution du chiffre d'affaires hebdomadaire BtoB par categorie", y="",x="")  + scale_y_continuous(labels=euro) + theme(axis.text.x = element_text(angle = 90)) + geom_vline(data = ca_j, aes(xintercept = as.Date('2021-10-01')), linetype='dotted')
+```
+
+On remarque une evidente chute du CA alentour Oct. 2, avec une baisse considérable des ventes de cat 1. En effet aucun produit de catégorie 1 a été vendu pendant le mois d'octobre 2021.
+
+
+# Correlations
+
+## Genre client/ categorie de livres achetés
+
+Pour ce genre de corrélation entre variables qualitatives nous irons utiliser un test chi2:
+
+```{r}
+
+library(broom)
+
+sc <- table(clients$sex, clients$categ)
+chi.sc <- chisq.test(sc)
+print(chi.sc)
+augment(chi.sc)
+
+ggplot(data = augment(chi.sc), aes(x=Var1, y=Var2)) + 
+  geom_tile(aes(fill=.resid)) + 
+  geom_text(aes(label=round(.resid,2))) + 
+              labs(x="Sexe", y="Categorie") + scale_fill_gradient2() + theme_minimal() +theme(legend.position = "none")
+```
+
+Le test permet de rejeter H0 (sexe et catégorie d'achats sont indépendants): il y a donc, à un niveau alpha de 0.05, une corrélation entre le deux variables. Les différence plus accentués sont remarquables pour les achats de catégorie 1.
+
+##  Relation entre la variable `age`,`agegroup` et autre variables
+
+### Difference entre plusieurs moyennes
+
+Encore une fois, nous aborderons l'analyse suivante à but démonstratif, car on sait déjà qu'il existe une différence entre le moyennes des groupes étudiés.
+
+Pour utiliser une ANOVA pour étudier la relation entre tranche d'age et montant des totale des achats on doit vérifier les conditions:
+
+    1) Les mesures sont indépendantes
+
+    2) Les échantillons ont des variances égales
+
+    3) Au moins 20 individus par échantillon, ou normalité des populations de chaque échantillon supposée ou vérifiée
+
+```{r warning=FALSE}
+
+stats_clients %>% group_by(agegroup) %>%summarise(total = sum(tot_achats), var=var(tot_achats), mean=mean(tot_achats)) %>% kable()
+
+stats_clients %>% group_by(agegroup) %>% ggplot(aes(agegroup, tot_achats, fill= agegroup)) +geom_boxplot() + stat_summary(fun=mean) + scale_y_continuous(label=euro)
+
+ggplot(stats_clients, aes(sample=tot_achats, group=agegroup)) +geom_qq() + geom_qq_line() + facet_wrap(~agegroup)
+
+#ratio max var  / min var >> 2
+
+```
+
+Même en acceptant la première condition d'indépendance, on remarquera que les distributions des totaux par catégorie d'age ne remplissent pas la condition de normalité et le ratio entre les variances max/min est supérieur à 2.Nous allons nous servir donc du test non paramétrique de Kruskal-Wallis avant d'étudier la relation entre age considérée comme variable continue et total d'achats.
+
+```{r}
+kruskal.test(stats_clients$tot_achats, stats_clients$agegroup)
+```
+
+H0(égalité des moyennes entre groupes) est facilement rejeté.
+
+D'après le résultat du test de Kruskal-Wallis, nous savons qu'il existe une différence significative entre les groupes, mais nous ne savons pas quelles paires de groupes sont différentes.
+
+Il est possible d'utiliser la fonction pairwise.wilcox.test() pour calculer des comparaisons par paires entre les niveaux de groupe avec des corrections pour les tests multiples.
+
+```{r}
+pairwise.wilcox.test(stats_clients$tot_achats, stats_clients$agegroup)
+```
+
+Les moyennes de chaque groupe sont toutes significativement différentes l'une de l'autre exceptée la différence entre 1928-1944 et 1944-1959. La tranche d'age est corrélée a donc une corrélation avec la somme totale des achats pour la plupart des catégories.
+
+-----
+
+Nous allons résumer les statistiques demandées sur un tableau ou les clients sont regroupé par années de naissance:
+
+```{r}
+final_stats <- stats_clients %>% group_by(birth) %>% summarise(moy_achats_tot = mean(tot_achats), moy_achats_mois = mean(achats_mois), panier_moyen = median(panier_moyen))
+
+stats_clients %>% group_by(agegroup) %>% summarise(moy_achats_tot = mean(tot_achats), moy_achats_mois = mean(achats_mois), panier_moyen = median(panier_moyen)) %>% kable()
+
+```
+
+Ensuite nous allons étudier à l'aide de la regression lineaire la correlation entre l'année de naissance et les autre variables.
+
+## Total des achats par client en relation à l'année de naissance
+
+```{r warning=FALSE}
+
+stats_clients %>% group_by(agegroup) %>% summarise(moy_tot_achats = mean(tot_achats), sd_tot_achats = sd(tot_achats))
+
+ggplot(stats_clients, aes(agegroup, tot_achats, fill = agegroup)) + geom_boxplot(show.legend = FALSE) + stat_summary(fun =mean, show.legend = FALSE) + scale_y_continuous(label=euro, n.breaks = 6)
+
+stats_clients %>% ggplot(aes(birth, tot_achats, color=agegroup)) + geom_jitter(alpha=0.5) + scale_y_continuous(label=euro)
+
+final_stats %>% ggplot(aes(birth, moy_achats_tot))  + geom_point() + geom_smooth(method = "lm", se=FALSE) + scale_y_continuous(label=euro)
+
+cor.test(~ tot_achats + birth, data=stats_clients)
+
+lr.agetot <- lm(tot_achats ~ birth, data=stats_clients)
+lr.agemoytot <- lm(moy_achats_tot ~ birth, data=final_stats)
+summary(lr.agetot)
+summary(lr.agemoytot)
+
+```
+
+IL y a bien une corrélation significative, même si faible (r=0.19) entre `tot_achats` et `birth`.
+Si nous travaillons avec tous les données, un modèle linéaire est très faiblement significatif et permet d'expliquer seulement le 3% de variabilité de la variable dépendante. 
+En revanche si on travaille avec la moyenne par groupe le modèle est beaucoup plus intéressant avec un R2 de 0.567.
+
+## Panier moyen par client en relation à l'année de naissance
+
+```{r warning=FALSE}
+stats_clients %>% group_by(agegroup) %>% summarise(p_moyen = mean(panier_moyen), sd_p_m = sd(panier_moyen))
+
+ggplot(stats_clients, aes(agegroup, panier_moyen, fill = agegroup)) + geom_boxplot(show.legend = FALSE) + stat_summary(fun =mean, show.legend = FALSE)
+
+stats_clients %>% ggplot(aes(birth, panier_moyen, color=agegroup)) + geom_jitter(alpha=0.3) + scale_y_continuous(label=euro)
+final_stats %>% ggplot(aes(birth, panier_moyen)) + geom_point() + geom_smooth(method='lm',se=FALSE) + geom_smooth(se=FALSE, linetype='dotted',color = 'orange') + scale_y_continuous(label=euro)
+
+cor.test(stats_clients$birth, stats_clients$panier_moyen)
+
+lr.pm <- lm(panier_moyen ~ birth, data=stats_clients)
+summary(lr.pm)
+
+```
+
+Ici la relation est bien significative avec un r = 0.59 et un modèle linéaire est possible. Même si un modèle simple n'explique pas beaucoup de la variance, il est un point de départ. 
+
+## Année de naissance et frequence des achats
+
+```{r warning=FALSE}
+stats_clients %>% group_by(agegroup) %>%summarise(n_achats_mois=mean(achats_mois), sd_achats_mois= sd(achats_mois))
+
+ggplot(stats_clients, aes(agegroup, achats_mois, fill = agegroup)) + geom_boxplot(show.legend = FALSE) + stat_summary(fun =mean, show.legend = FALSE)
+
+stats_clients %>% ggplot(aes(birth, achats_mois, color=agegroup)) + geom_jitter(alpha=0.5) 
+final_stats %>% ggplot(aes(birth, moy_achats_mois)) + geom_point() + geom_smooth(method='lm') + geom_smooth(se=FALSE, color='orange', linetype='dotted')
+
+cor.test(~ achats_mois + birth, data=stats_clients)
+
+lr.achm <- lm(achats_mois ~ birth, data=stats_clients)
+summary(lr.achm)
+
+```
+
+Ici on remarque bien une evidente relation non lineaire(mais significative) entre les deux variables et en effet comme souvent dans ces cas le coefficient r est proche de 0.
+
+
+On resumera ces relations à l'aide d'un pairplot:
+
+
+```{r pairs}
+library(GGally)
+ggpairs(stats_clients, aes(color=agegroup,alpha=0.5), columns = c(4:7) , progress = FALSE) +theme_minimal()
+
+```
+
+
+
+## Relation entre tranche d'age et categories achetés
+
+Pour terminer nous allons étudier la relation entre ces deux variable, pour vérifier la leur dépendance éventuelle.
+
+
+```{r}
+stats_clients %>% group_by(agegroup) %>% summarise(across(cat_0:cat_2, sum)) %>% pivot_longer(cols=cat_0:cat_2,names_to = 'categorie', values_to = 'nombre_achats') %>% ggplot() + geom_tile(aes(agegroup,categorie, fill=nombre_achats)) + scale_fill_viridis_c()
+
+tac <- table(clients$agegroup, clients$categ)
+chitac <- chisq.test(tac)
+chitac
+
+ggplot(data = augment(chitac), aes(x=Var1, y=Var2)) + 
+  geom_tile(aes(fill=.resid)) + 
+  geom_text(aes(label=round(.resid,2))) + 
+              labs(x="Tranche d'age", y="Categorie") + scale_fill_gradient2() + theme_minimal() +theme(legend.position = "none")
+```
+
+Avec une p-value < 2.2e-16 on rejette l'hypothèse nulle d'indépendance. On pourra remarquer principalement la forte valeur du résidu en catégorie 2 pour la tranche d'age 1989-2004.
+
+
+------
+
+## Probabilité conditionnelle
+
+Probabilité qu’un client achète la référence 0_525 sachant qu’il a acheté la référence 2_159
+
+La probabilité conditionnelle à calculer est la suivante : P(0_525 | 2_159) = P(0_525) ^ P(2_159) / P(2_159)
+
+```{r}
+getproba <- function(subset) {mean(subset)}
+conditional <- function(proposition, given) {getproba(proposition[given])}
+
+pdtr_cust %>% group_by(client_id) %>% summarise(ref1 = if ('0_525' %in% id_prod) 1 else 0, ref2 = if ('2_159' %in% id_prod) 1 else 0 ) -> cl_ref
+
+sub1 <- cl_ref$ref1 == 1
+sub2 <- cl_ref$ref2 ==1
+conditional(sub1, sub2)
+#ou alternativement
+getproba(sub1 & sub2) / getproba(sub2)
+```
+
+Le 86 % de clients qui ont acheté la référence 2_159 ont aussi acheté la référence 0_525; a noter aussi que tous les clients qui ont acheté la première réferénce ont aussi acheté la seconde.
+
+
+# Conclusions
+
+Pour résumer:
+
+```{r fig.width=10}
+final_stats %>% mutate(agegroup = cut(birth, 5)) %>% ggpairs(columns = c(1:4), aes(fill=agegroup, color=agegroup),progress = FALSE) + theme_light() + labs(title ='Correlations sur les données agrégés')
+
+#donnés non agrégés
+cor(stats_clients$birth, stats_clients[c(5:10)])
+
+#données agrégés
+cor(final_stats$birth, final_stats[-1])
+```
+
+- `tot_achats` : bien que faiblement cette variable est bien corrélée à l’âge du client; cette relation est bien plus évidente quand on traite avec la moyenne. La catégorie qui tend à dépenser le plus en moyenne c'est les 1974-1989, suivi des générations plus jeunes.
+
+- `panier moyen` : cette corrélation est la plus forte entre celles enquêtées avec une tendance non linéaire très marqué. Danse ce cas on remarque bien la relation positive entre catégorie d’âge et panier moyen, ce dérnièr (en moyenne) tend à s'agrandir en baissant l’âge du client.
+
+- `achats mois` : encore une fois nous trouvons une relation significative, cette fois fortement non linéaire entre l’âge et la fréquence d'achats, avec des groupes bien démarqués. Les acheteurs plus fréquents ce sont ceux de la tranche 1974-1989, suivis de générations plus anciennes et en dernière la génération 1989-2004, qui en revanche démontre le panier moyen plus importante (et cela s'explique avec la préférence pour les produits de catégorie 2, bien plus chères des autres).
+
+Nous avons aussi rémarqué une relation, bien que faible, entre sexe et catégorie de produits achetés et entre tranche d’âge et catégorie produit, bien marqué en particulier pour la jeune génération et la catégorie 2.
+
