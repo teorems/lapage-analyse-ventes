@@ -2,8 +2,8 @@
 
 Sales Analysis of an e-commerce. 
 
-- balance sheet analysis
-- client analysis with Lorenz curve
+- Balance sheet analysis
+- Client analysis with Lorenz curve
 - Correlation analysis
-- Parametrical and non parametrical tests(Chi-square, ANOVA, T-test)
+- Parametrical and non parametrical tests(Chi-square, ANOVA, T-test, Wilcoxon rank sum test...)
 - Linear Regression
